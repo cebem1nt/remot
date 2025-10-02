@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -6,6 +7,7 @@
 #include <regex>
 #include <string>
 #include <sys/ioctl.h>
+#include <sys/poll.h>
 #include <sys/types.h>
 #include <tgbot/tgbot.h>
 #include <unistd.h>
@@ -14,6 +16,14 @@
 
 using namespace std;
 using namespace TgBot;
+
+// Unfortunately telegram can not parse ansii escape codes :-(
+// We have to remove them
+string remove_ansii(string content) 
+{
+    regex ansii_regex(R"(\x1B\[[0-?9;]*[mK]|(\[\?2004[hl]))");
+    return regex_replace(content, ansii_regex, "");
+} 
 
 class Shell {
 public:
@@ -27,7 +37,7 @@ public:
 
     void init_session() 
     {
-        this->master_fd = posix_openpt(O_RDWR);
+        this->master_fd = posix_openpt(O_RDWR | O_NONBLOCK);
         grantpt(master_fd);
         unlockpt(master_fd);
 
@@ -64,7 +74,6 @@ public:
         if (!is_active) return;
 
         pid_t pid = fork();
-
         if (pid == 0) {
             close(this->master_fd);
 
@@ -90,60 +99,52 @@ public:
         }
     }
 
-    void exec_in_shell(std::string cmd) {
+    void exec(std::string cmd) {
         cout << "Exec in shell: " << cmd << endl;
         cmd += '\n';
 
         const char* c_cli = cmd.c_str();
-
-        int flags = fcntl(this->master_fd, F_GETFL, 0);
-
-        fcntl(this->master_fd, F_SETFL, flags | O_NONBLOCK);
         write(this->master_fd, c_cli, strlen(c_cli));
-        fcntl(this->master_fd, F_SETFL, flags);
+    }
+
+    std::string peek() {
+        char buf[4096];
+        int n;
+
+        string output;
+
+        while ((n = read(this->master_fd, buf, sizeof(buf))) > 0) {
+            output.append(buf, static_cast<size_t>(n));
+        }
+
+        return remove_ansii(output);
     }
 };
 
-// Unfortunately telegram can not parse ansii escape codes :-(
-// We have to remove them
-string remove_ansii(string content) 
-{
-    regex ansii_regex(R"(\x1B\[[0-?9;]*[mK]|(\[\?2004[hl]))");
-    return regex_replace(content, ansii_regex, "");
-} 
-
-void interactive_shell(
-    Bot& bot, Shell& sh, int64_t chat_id
+void poll_update_msg(
+    Bot& bot, Shell& sh, int64_t chat_id, int64_t terminal_msg_id
 ) 
 {
-    sh.init_session();
-    sh.open_shell();
+    struct pollfd fds[1];
+    fds[0].fd = sh.master_fd;
+    fds[0].events = POLLIN;
 
     pid_t pid = fork();
     if (pid == 0) {
-        string terminal_content = "Initializing terminal...";
-
-        auto terminal_msg = bot.getApi().sendMessage(chat_id, terminal_content);
-        char buf[256];
-
-        sh.master_pid = getpid();
-
         while (true) {
-            int n = read(sh.master_fd, buf, sizeof(buf));
+            int poll_res = poll(fds, 1, -1);
+            if (poll_res == -1) {
+                perror("poll");
+                exit(127);
+            }
 
-            if (n > 0) {
-                string output(buf, static_cast<size_t>(n));
-                string cleaned_output = remove_ansii(output);
-
-                terminal_msg->text.append(cleaned_output);
-                bot.getApi().editMessageText(terminal_msg->text, chat_id, terminal_msg->messageId);
-
-            } else {
-                bot.getApi().sendMessage(chat_id, "Terminal died");
-                break;
+            if (fds[0].revents & POLLIN) {
+                bot.getApi().editMessageText(
+                    "```Terminal\n" + sh.peek() + "\n```", 
+                    chat_id, terminal_msg_id, "", "Markdown");
             }
         }
-    } 
+    }
 }
 
 int main() 
@@ -169,17 +170,33 @@ int main()
         }
 
         if (msg.find("/shell") == 0) {
-            interactive_shell(bot, sh, chat_id);
+            if (sh.is_active) {
+                bot.getApi().sendMessage(chat_id, "Allready running");
+                return;
+            }
+
+            auto terminal_msg = bot.getApi().sendMessage(chat_id, "Initializing terminal...");
+
+            sh.init_session();
+            sh.open_shell();
+            poll_update_msg(bot, sh, chat_id, terminal_msg->messageId);
         }
         else if (msg.find("/end") == 0) {
+            // TODO for some reason this pid -> kill aproach doesnt work 
             sh.end_session();
         }
+
         else if (sh.is_active) {
-            sh.exec_in_shell(message->text);
+            sh.exec(message->text);
+            bot.getApi().deleteMessage(chat_id, message->messageId);
+        } 
+        else {
+            bot.getApi().sendMessage(chat_id, "Shell is not running");
         }
     });
 
     TgLongPoll longPoll(bot);
+    cout << "Bot name: " << bot.getApi().getMe()->username << endl;
 
     while (true) {
         try {
