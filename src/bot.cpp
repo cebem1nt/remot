@@ -9,6 +9,7 @@
 #include <sys/ioctl.h>
 #include <sys/poll.h>
 #include <sys/types.h>
+#include <termios.h>
 #include <tgbot/tgbot.h>
 #include <unistd.h>
 
@@ -21,8 +22,8 @@ using namespace TgBot;
 // We have to remove them
 string remove_ansii(string content) 
 {
-    regex ansii_regex(R"(\x1B\[[0-?9;]*[mK]|(\[\?2004[hl]))");
-    return regex_replace(content, ansii_regex, "");
+    regex ansi_re(R"((\x9B|\x1B\[)[0-?]*[ -\/]*[@-~])");;
+    return regex_replace(content, ansi_re, "");
 } 
 
 class Shell {
@@ -49,6 +50,13 @@ public:
         ws.ws_col = 20;
 
         ioctl(this->slave_fd, TIOCSWINSZ, &ws);
+
+        // struct termios oldt, t; 
+        // tcgetattr(slave_fd, &oldt);
+
+        // // cfmakeraw(&t); // makes canonical/raw changes
+        // t.c_lflag &= ~ECHO; // ensure echo off
+        // tcsetattr(slave_fd, TCSANOW, &t);
 
         this->is_active = true; 
     }
@@ -96,6 +104,7 @@ public:
             } else {
                 execlp(shell, shell, NULL);
             }
+            exit(EXIT_FAILURE);
         }
     }
 
@@ -144,6 +153,7 @@ void poll_update_msg(
                     chat_id, terminal_msg_id, "", "Markdown");
             }
         }
+        exit(EXIT_FAILURE);
     }
 }
 
