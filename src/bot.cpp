@@ -1,15 +1,29 @@
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
+#include <fstream>
+#include <ios>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <tgbot/tgbot.h>
 #include <regex>
+#include <tgbot/types/Document.h>
 #include <unistd.h>
 
 #include "bot.hpp"
 
+#define DOWNLOAD_DIR (expand_user("~/downloads/"))
+
 using namespace TgBot;
+
+inline void err_throw(const char* reason) 
+{
+    perror(reason);
+    throw std::runtime_error(reason);
+}
 
 // Unfortunately telegram can not parse ansii escape codes :-(
 // We have to remove them
@@ -27,17 +41,33 @@ public:
 
     void init_session() 
     {
+        if ((master_fd = posix_openpt(O_RDWR)) == -1) 
+            err_throw("openpt");
 
+        if (grantpt(master_fd) == -1)
+            err_throw("grantpt");
+
+        if (unlockpt(master_fd) == -1)
+            err_throw("unlockpt");
+
+        char* slave_path = ptsname(master_fd);
+        slave_fd = open(slave_path, O_RDWR);
+        is_active = true;
     }
 
     void end_session() 
     {
-       
+        if (!is_active)
+            return;
+
+        close(slave_fd);
+        close(master_fd);
+        is_active = false;
     }
 
-    void exec(std::string cmd) 
+    void exec(const char* cmd) 
     {
-       
+        
     }
 };
 
@@ -105,10 +135,11 @@ std::string get_args(std::string msg)
 
 int main() 
 {
+    bool  waiting_for_file;
     Shell sh;
     Bot   bot(API_KEY);
 
-    bot.getEvents().onAnyMessage([&bot, &sh](Message::Ptr message) {
+    bot.getEvents().onAnyMessage([&bot, &sh, &waiting_for_file](Message::Ptr message) {
         int64_t user_id = message->from->id;
         int64_t chat_id = message->chat->id;
 
@@ -141,6 +172,41 @@ int main()
             auto file = InputFile::fromFile(file_path, "file");
             bot.getApi().sendDocument(chat_id, file);
         }
+
+        else if (msg.find("/upload") == 0) {
+            waiting_for_file = !waiting_for_file;
+
+            if (!waiting_for_file) {
+                bot.getApi().sendMessage(chat_id, "Not waiting for file anymore");
+                return;
+            }
+
+            bot.getApi().sendMessage(chat_id, "Send your file");
+        }
+
+        else if (waiting_for_file) {
+            auto doc = message->document;
+
+            if (!doc) {
+                bot.getApi().sendMessage(chat_id, "I need a file. Send it.");
+                return;
+            }
+
+            bot.getApi().sendMessage(chat_id, "Processing file..");
+
+            auto file = bot.getApi().getFile(doc->fileId);
+            std::string raw = bot.getApi().downloadFile(file->filePath);
+
+            std::ofstream out(DOWNLOAD_DIR + doc->fileName, std::ios::binary);
+            out.write(raw.data(), raw.size());
+            out.close();
+
+            bot.getApi().sendMessage(chat_id, 
+                "Downloaded file " + doc->fileName + " to " + DOWNLOAD_DIR);
+
+            waiting_for_file = !waiting_for_file;
+        }
+
 
         // if (msg.find("/shell") == 0) {
         //     if (sh.is_active) {
