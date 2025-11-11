@@ -1,6 +1,6 @@
 # Remot
 
-Tiny telegram bot to provide an interactive tty session with the host machine. Currently work in progress (i don't have enough knowledge to implement a fully functional terminal emulator in telegram :( )
+Tiny telegram bot to provide an interactive tty session with the host machine. Current state: Kinda works
 
 ## Usage
 
